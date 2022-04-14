@@ -1,0 +1,246 @@
+---
+title: "stat420 final proj"
+output:
+  pdf_document:
+    toc: yes
+  html_document:
+    theme: default
+    toc: yes
+---
+- Wenhao Tan - wenhaot2
+
+- Ray Pan - yulinp3
+
+- Yulan Ma - yulanma2
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+***
+
+## Introduction
+
+Australia is a continental island country located in the southern hemisphere. It attracts billions of travelers each year. This data set contains the daily weather observations from numerous Australian weather stations from 2008. There are a total of 1685 observations and 19 columns of variables, including locations of the weather stations, minimum temperature, maximum temperature, wind gust speed, humidity, pressure, etc.
+
+We took this data set from <https://www.kaggle.com/jsphyg/weather-dataset-rattle-package>. The original data set contains about 10 years of daily weather observations from many locations across Australia, and we took only the data of the year 2008 from Canberra.
+
+We hope to understand the general weather in Australia, for example the minimum temperature and chance of rain, so that we know when we should travel to Australia during the year for vacation.
+
+
+***
+
+## Methods
+
+```{r, results = FALSE, message=FALSE, warning=FALSE}
+#import packages
+library(readr)
+library(faraway)
+library(ggplot2)
+library(lmtest)
+library(caret)
+library(ROCR)
+library(knitr)
+library(kableExtra)
+```
+
+### Data
+
+We first do some data cleaning work, including cleaning up the NAs contained in the dataset.
+```{r, warning=FALSE}
+#import the original dataset
+weather_raw <- read_csv("weatherAUS.csv")
+
+# function to determine proportion of NAs in a vector
+na_prop = function(x) {
+  mean(is.na(x))
+}
+
+# check proportion of NAs in each column
+sapply(weather_raw, na_prop)
+
+# create dataset without columns containing more than 33% NAs
+weather_clean = na.omit(weather_raw[, !sapply(weather_raw, na_prop) > 0.33])
+# proportion of cleaned dataset to full dataset
+nrow(weather_clean)/nrow(weather_raw)
+
+weather_clean$Date=as.character(weather_clean$Date)
+weather <- subset(weather_clean,startsWith(weather_clean$Date, "2008"))
+#select the capital city to predict
+weather_can<-weather[which(weather$Location=='Canberra'),]
+head(weather_can, 5)
+```
+
+We cleaned up the data with NA omitted and took only the data of the year 2008 from the city Canberra.
+
+### Predicting Minimum Temperature
+
+```{r,warning=FALSE}
+#scatter plot of date vs. minimum temperature
+ggplot(data = weather_can, aes(x = Date, y = MinTemp))+geom_point(color="blue")
+#remove the column of Location to avoid potential problems
+weather_can=weather_can[,-2]
+#fit the model with possible predictors
+raw_mod_1<-lm(MinTemp ~ (RainToday + MaxTemp + Pressure3pm + Humidity3pm )^2,
+              data=weather_can)
+raw_mod_2<-lm(MinTemp ~ (RainToday + MaxTemp + 
+                         Pressure3pm + Humidity3pm + WindGustSpeed)^2, 
+              data=weather_can)
+raw_mod_3<-lm(MinTemp ~ (RainToday + MaxTemp + Pressure3pm + 
+                         Humidity3pm + WindGustSpeed + Temp3pm)^2,
+              data=weather_can)
+#p-values for ANOVA test
+anova(raw_mod_1, raw_mod_2)["Pr(>F)"][2,]
+anova(raw_mod_2, raw_mod_3)["Pr(>F)"][2,]
+#backward selection on the model
+select_2=step(raw_mod_2, direction="backward", trace=0)
+select_3=step(raw_mod_3, direction="backward", trace=0)
+#adjusted R-squared values
+adj_2=summary(select_2)$adj
+adj_3=summary(select_3)$adj
+
+#Breusch-Pagan Test and Shapiro–Wilk test test values for model diagnostics
+bp_2=bptest(select_2)$p.value
+sha_2=shapiro.test(resid(select_2))$p.value
+bp_3=bptest(select_3)$p.value
+sha_3=shapiro.test(resid(select_3))$p.value
+
+#calculate RMSE
+calc_loocv_rmse<-function(model){
+  sqrt(mean((resid(model) / (1 - hatvalues(model)))^2))
+}
+rmse_2=calc_loocv_rmse(select_2)
+rmse_3=calc_loocv_rmse(select_3)
+
+data=data.frame(
+  c(adj_2, adj_3),
+  c(bp_2, bp_3),
+  c(sha_2, sha_3),
+  c(rmse_2, rmse_3))
+
+#put all values together
+colnames(data)=c("adj r.squared", "Breusch-Pagan", "Shapiro–Wilk", "LOOCV RMSE")
+rownames(data)=c("Mod2", "Mod3")
+kable(data)%>%
+  kable_styling(full_width = T)
+
+#Residual vs Fitted plot
+par(mfrow=c(1,2))
+plot(select_2, which=1)
+plot(select_3, which=1)
+
+#Normal Q-Q plot
+par(mfrow=c(1,2))
+qqnorm(resid(select_2))
+qqline(resid(select_2))
+qqnorm(resid(select_3))
+qqline(resid(select_3))
+```
+
+The scatter plot makes sense because Australia is in the southern hemisphere and it has a relatively low temperature in the middle of the year. 
+
+We thought the predictors in raw_mod_1 would be relative to the response variable "MinTemp", but we were unsure whether the variables "WindGustSpeed" and "Temp3pm" have effects on "MinTemp". We did two ANOVA tests and found out that both the p-values are lower than 0.05, which means the two variables somewhat contribute to "MinTemp", so we added these two variables in our model.
+
+We run several diagnostics, including Breusch-Pagan Test, Shapiro–Wilk test, and the LOOCV RMSE calculation on our model and print a table for those values. Even though the value for Shapiro–Wilk test decreases, it's still in an acceptable range. 
+
+Also, the adjusted R-squared value of the third model increases, which indicates an increase in the power of the regression model. So we conclude that the third model would be the best here. 
+
+We also plot the fitted vs. residual and normal Q-Q plots as part of the diagnostic process. Some outlier like the value of 76, 233, 306 were detected.
+
+### Predicting whether there will be rain tomorrow
+
+Here we selected another response variable "RainTomorrow". 
+```{r}
+set.seed(100)
+#remove the column of Date to avoid potential problems
+weather_new<-weather[,-1]
+#change the binary factors into numeric values
+weather_new$RainTomorrow[weather_new$RainTomorrow=="Yes"]<-1
+weather_new$RainTomorrow[weather_new$RainTomorrow=="No"]<-0
+weather_new$RainTomorrow<-as.numeric(weather_new$RainTomorrow)
+#dividing the dataset into training(70%) and testing(30%)
+we_trn_idx = sample(nrow(weather_new), size = 0.7 * nrow(weather_new))
+we_trn = weather_new[we_trn_idx, ]
+we_tst = weather_new[-we_trn_idx, ]
+#fit glm model
+fit<-glm(RainTomorrow~., data=we_trn, family="binomial")
+prob=predict(fit, we_tst, type="response")
+
+we_trn$pred<-fitted(fit)
+pred<-prediction(we_trn$pred,we_trn$RainTomorrow)
+perf<-performance(pred,"tpr","fpr")
+plot(perf,colorize = T,print.cutoffs.at = seq(0.1,by = 0.1))
+
+#use 0.5 as the cutoff according to the ROC curve
+pred = factor(ifelse(prob>0.5, "1", "0"))
+confusionMatrix(pred, factor(we_tst$RainTomorrow))
+```
+
+From the confusion matrix, we have an accuracy of 0.8261 when predicting whether there will be rain tomorrow with a sensitivity of 0.9409 and specificity of 0.4444, which are fairly reasonable.
+
+***
+
+## Results
+
+Mod3 would be our best model here for predicting minimum temperature. It has a adjusted R.squared value of 0.7856 with reasonable diagnostic values. It has a relative lower LOOCV RMSE value comparing to Mod2. 
+
+Final model:
+$\hat{y}_{MinTemp} = 143.8 + 3.507x_{RainTodayYes} + 37.95x_{MaxTemp} - 0.1705x_{Pressure3pm} + 25.45x_{Humidity3pm} - 3.155x_{WindGustSpeed}$
+$- 36.79x_{Temp3pm} - 0.04286x_{RainTodayYes}x_{Humidity3pm} - 0.03517x_{MaxTemp}x_{Pressure3pm} - 0.02637x_{MaxTemp}x_{Humidity3pm}$
+$- 0.007057x_{MaxTemp}x_{WindGustSpeed} + 0.003436x_{Pressure3pm}x_{WindGustSpeed}+ 0.03499x_{Pressure3pm}x_{Temp3pm}$ 
+$-0.003212 x_{Humidity3pm}x_{WindGustSpeed} + 0.03091x_{Humidity3pm}x_{Temp3pm}$
+
+```{r}
+predict(select_3, data.frame(RainToday='No',
+                             MaxTemp=32.3,
+                             Pressure3pm=1006, 
+                             Humidity3pm=33, 
+                             WindGustSpeed=41, 
+                             Temp3pm=29.7))
+```
+
+We selected a random day from 2019 to see if our model is accurate enough. The predicted minimum temperature is 17.37, and the recorded minimum temperature is 17.5, which is pretty close.
+
+```{r}
+ggplot(data = weather_can,aes(x=Date,y=MinTemp))+
+  geom_point(color="dark green")+
+  ggtitle('Date vs. Humidity 3pm')
+
+ggplot(data = weather_can,aes(x=Humidity3pm,y=MinTemp))+
+  geom_point(color="purple")+
+  ggtitle('Minimum temp vs. Humidity 3pm')
+
+ggplot(data = weather_can,aes(x=WindGustSpeed,y=MinTemp))+
+  geom_point(color="purple")+
+  ggtitle('WindGustSpeed vs. Humidity 3pm')
+```
+
+On the other hand, if one wants to see whether there will be rain tomorrow, we would use the glm model provided above with an accuracy of 0.8261. The sensitivity (the ability to correctly predict a rainy day) is 0.9409, which means it could basically predict correctly with a few exceptions. 
+
+***
+
+## Discussion
+
+We were able to improve our model based on adding more relative predictors to the existing model. We evaluated the prediction of minimum temperature in Canberra, which would be helpful for our vacation decisions in Canberra, Australia. Also, we believe agriculture and animal husbandry could benefit from these predictions.
+There are many missing values in the dataset which may cause the result to be inaccurate. There are only 328 values in a total of 365 days, which means there are possibilities that not all possible conditions are considered in the model. Even though the models we chose have fairly high reliability, people should use caution when making decisions based on the prediction due to the chance of possible margin of error or false prediction.
+
+***
+
+## Appendix
+
+```{r}
+ggplot(data = weather, aes(x = Date, y = MinTemp,     color=Location))+geom_point()
+```
+
+### Summary of model 2
+```{r}
+summary(select_2)
+```
+
+### Summary of model 3
+```{r}
+summary(select_3)
+```
+
+
+
